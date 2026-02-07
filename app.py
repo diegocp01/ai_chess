@@ -26,6 +26,16 @@ game = {
 shutdown_summary_printed = False
 
 
+def _has_game_activity():
+    board = game["board"]
+    return (
+        len(board.move_stack) > 0
+        or bool(game["move_stats"])
+        or bool(game["captured_by_white"])
+        or bool(game["captured_by_black"])
+    )
+
+
 def _print_api_call_summary(event_name):
     counts = get_api_call_counts()
     mini_calls = counts.get("gpt-5-mini", 0)
@@ -45,7 +55,7 @@ def _log_game_over_summary_once():
 
 
 def _save_game_results_once():
-    if game.get("results_saved"):
+    if game.get("results_saved") or not _has_game_activity():
         return
     _save_game_results()
     game["results_saved"] = True
@@ -65,10 +75,12 @@ def _print_shutdown_summary_once(event_name):
 
 
 def _handle_shutdown_signal(signum, _frame):
+    _save_game_results_once()
     _print_shutdown_summary_once(f"signal {signum}")
     raise SystemExit(0)
 
 
+atexit.register(_save_game_results_once)
 atexit.register(_print_shutdown_summary_once, "process exit")
 signal.signal(signal.SIGINT, _handle_shutdown_signal)
 if hasattr(signal, "SIGTERM"):
