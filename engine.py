@@ -1,6 +1,7 @@
 import chess
 import json
 import random
+import time
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from openai import OpenAI
@@ -144,9 +145,11 @@ def get_black_pieces_with_moves(board):
 
 
 def poll_piece(piece_info, fen):
-    """Ask gpt-5-mini whether this piece should move."""
+    """Ask gpt-5-mini whether this piece should move.
+    Returns {"proposal": ... or None, "api_time": float}.
+    """
     if client is None:
-        return None
+        return {"proposal": None, "api_time": 0}
 
     prompt = (
         f"You are a {piece_info['piece']} at {piece_info['square']}. "
@@ -158,25 +161,28 @@ def poll_piece(piece_info, fen):
     )
     try:
         _increment_api_call("gpt-5-mini")
+        start = time.time()
         response = client.responses.parse(
             model="gpt-5-mini",
             input=[{"role": "user", "content": prompt}],
             text_format=PiecePollResponse,
         )
+        api_time = time.time() - start
+
         data = response.output_parsed
         if data is None or not data.should_move:
-            return None
+            return {"proposal": None, "api_time": api_time}
 
         target_square = data.target_square.strip().lower()
         if len(target_square) in (4, 5) and target_square[:2] == piece_info["square"]:
             target_square = target_square[2:4]
 
         if len(target_square) != 2:
-            return None
+            return {"proposal": None, "api_time": api_time}
 
         legal_targets = {uci_move[2:4] for uci_move in piece_info["legal_moves"]}
         if target_square not in legal_targets:
-            return None
+            return {"proposal": None, "api_time": api_time}
 
         risk_by_target = {}
         for move_data in piece_info.get("legal_moves_with_risk", []):
@@ -189,32 +195,40 @@ def poll_piece(piece_info, fen):
                     risk_by_target[target] = min(risk_by_target[target], risk)
 
         return {
-            "piece": piece_info["piece"],
-            "from_square": piece_info["square"],
-            "target_square": target_square,
-            "reason": data.reason,
-            "legal_moves": piece_info["legal_moves"],
-            "lose_piece_probability": risk_by_target.get(target_square),
+            "proposal": {
+                "piece": piece_info["piece"],
+                "from_square": piece_info["square"],
+                "target_square": target_square,
+                "reason": data.reason,
+                "legal_moves": piece_info["legal_moves"],
+                "lose_piece_probability": risk_by_target.get(target_square),
+            },
+            "api_time": api_time,
         }
     except Exception as exc:
         print(f"Error polling {piece_info['piece']} at {piece_info['square']}: {exc}")
-    return None
+    return {"proposal": None, "api_time": 0}
 
 
 def poll_all_pieces(board):
     """Poll all Black pieces in parallel using threads.
-    Returns (pieces_polled, proposals).
+    Returns (pieces_polled, proposals, mini_times).
     """
     pieces = get_black_pieces_with_moves(board)
     fen = board.fen()
     proposals = []
+    mini_times = []
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(poll_piece, p, fen) for p in pieces]
         for f in futures:
             result = f.result()
             if result is not None:
-                proposals.append(result)
-    return len(pieces), proposals
+                api_time = result.get("api_time", 0)
+                if isinstance(api_time, (int, float)) and api_time > 0:
+                    mini_times.append(float(api_time))
+                if result["proposal"] is not None:
+                    proposals.append(result["proposal"])
+    return len(pieces), proposals, mini_times
 
 
 # --- Step 2: Heuristic probability scoring ---
@@ -353,12 +367,25 @@ def calculate_probabilities(board, proposals):
 
 # --- Step 3: Orchestrator ---
 
+def _is_highest_prob(scored_proposals, from_sq, to_sq):
+    """Check if the chosen move matches the highest probability proposal."""
+    if not scored_proposals:
+        return True
+    highest = max(scored_proposals, key=lambda x: x["probability_score"])
+    return highest["from_square"] == from_sq and highest["target_square"] == to_sq
+
+
 def orchestrator_decide(board, scored_proposals):
     """Ask gpt-5.2 to pick the best move from proposals."""
     if not scored_proposals:
         return None
     if client is None:
-        return _best_scored_fallback(scored_proposals, "fallback - OpenAI client not configured")
+        result = _best_scored_fallback(scored_proposals, "fallback - OpenAI client not configured")
+        result["orchestrator_time"] = 0
+        result["chose_highest_prob"] = None
+        result["orchestrator_used"] = False
+        result["orchestrator_error"] = True
+        return result
 
     proposals_text = json.dumps(scored_proposals, indent=2)
     prompt = (
@@ -369,22 +396,36 @@ def orchestrator_decide(board, scored_proposals):
     )
     try:
         _increment_api_call("gpt-5.2")
+        start = time.time()
         response = client.responses.parse(
             model="gpt-5.2",
             input=[{"role": "user", "content": prompt}],
             text_format=OrchestratorDecision,
         )
+        orchestrator_time = time.time() - start
+
         decision = response.output_parsed
         if decision is not None:
             return {
                 "piece": decision.piece,
                 "from": decision.from_square,
                 "to": decision.to_square,
+                "orchestrator_time": orchestrator_time,
+                "chose_highest_prob": _is_highest_prob(
+                    scored_proposals, decision.from_square, decision.to_square
+                ),
+                "orchestrator_used": True,
+                "orchestrator_error": False,
             }
     except Exception as exc:
         print(f"Orchestrator error: {exc}")
 
-    return _best_scored_fallback(scored_proposals, "fallback - highest heuristic score")
+    result = _best_scored_fallback(scored_proposals, "fallback - highest heuristic score")
+    result["orchestrator_time"] = 0
+    result["chose_highest_prob"] = None
+    result["orchestrator_used"] = False
+    result["orchestrator_error"] = True
+    return result
 
 
 # --- Main entry point ---
@@ -404,12 +445,13 @@ def get_ai_move(fen):
     board = chess.Board(fen)
 
     # Step 1: Poll pieces
-    pieces_polled, proposals = poll_all_pieces(board)
+    pieces_polled, proposals, mini_times = poll_all_pieces(board)
     pieces_volunteered = len(proposals)
 
     pipeline = {
         "pieces_polled": pieces_polled,
         "pieces_volunteered": pieces_volunteered,
+        "mini_times": mini_times,
     }
 
     if not proposals:
@@ -422,6 +464,10 @@ def get_ai_move(fen):
             "reasoning": "no piece volunteered - random fallback",
             "chosen_piece_reason": "",
             "proposals": [],
+            "orchestrator_time": 0,
+            "chose_highest_prob": None,
+            "orchestrator_used": False,
+            "orchestrator_error": False,
             **pipeline,
         }
 
@@ -437,6 +483,10 @@ def get_ai_move(fen):
             "reasoning": "no valid proposals - random fallback",
             "chosen_piece_reason": "",
             "proposals": [],
+            "orchestrator_time": 0,
+            "chose_highest_prob": None,
+            "orchestrator_used": False,
+            "orchestrator_error": False,
             **pipeline,
         }
 
@@ -459,6 +509,10 @@ def get_ai_move(fen):
                 "reasoning": decision.get("reasoning", ""),
                 "chosen_piece_reason": _find_chosen_reason(scored, move),
                 "proposals": scored,
+                "orchestrator_time": decision.get("orchestrator_time", 0),
+                "chose_highest_prob": decision.get("chose_highest_prob"),
+                "orchestrator_used": bool(decision.get("orchestrator_used", False)),
+                "orchestrator_error": bool(decision.get("orchestrator_error", False)),
                 **pipeline,
             }
 
@@ -475,8 +529,13 @@ def get_ai_move(fen):
         if move is None:
             return {}
         reasoning = "orchestrator failed - random legal fallback"
+        chose_highest_prob = None
     else:
         reasoning = "orchestrator failed - best heuristic pick"
+        if isinstance(decision, dict):
+            chose_highest_prob = decision.get("chose_highest_prob")
+        else:
+            chose_highest_prob = None
 
     return {
         "from": chess.square_name(move.from_square),
@@ -485,5 +544,9 @@ def get_ai_move(fen):
         "reasoning": reasoning,
         "chosen_piece_reason": _find_chosen_reason(scored, move) if scored else "",
         "proposals": scored,
+        "orchestrator_time": decision.get("orchestrator_time", 0) if isinstance(decision, dict) else 0,
+        "chose_highest_prob": chose_highest_prob,
+        "orchestrator_used": bool(decision.get("orchestrator_used", False)) if isinstance(decision, dict) else False,
+        "orchestrator_error": bool(decision.get("orchestrator_error", False)) if isinstance(decision, dict) else False,
         **pipeline,
     }

@@ -5,6 +5,22 @@ var board = null;
 var thinking = false;
 var selectedSquare = null;
 var selectedTargets = [];
+var capturedByWhite = [];
+var capturedByBlack = [];
+var PIECE_ICONS = {
+  K: "♔",
+  Q: "♕",
+  R: "♖",
+  B: "♗",
+  N: "♘",
+  P: "♙",
+  k: "♚",
+  q: "♛",
+  r: "♜",
+  b: "♝",
+  n: "♞",
+  p: "♟"
+};
 
 function updateStatus() {
   var status = document.getElementById("status");
@@ -62,13 +78,70 @@ function squareFromElement(el) {
   return null;
 }
 
+function renderCapturedPieces(elementId, pieces) {
+  var container = document.getElementById(elementId);
+  if (!container) return;
+
+  if (!Array.isArray(pieces) || pieces.length === 0) {
+    container.textContent = "-";
+    return;
+  }
+
+  container.innerHTML = "";
+  pieces.forEach(function (pieceSymbol) {
+    var span = document.createElement("span");
+    span.className = "captured-piece";
+    span.textContent = PIECE_ICONS[pieceSymbol] || pieceSymbol;
+    container.appendChild(span);
+  });
+}
+
+function setCapturedState(whitePieces, blackPieces) {
+  capturedByWhite = Array.isArray(whitePieces) ? whitePieces.slice() : [];
+  capturedByBlack = Array.isArray(blackPieces) ? blackPieces.slice() : [];
+  renderCapturedPieces("captured-by-white", capturedByWhite);
+  renderCapturedPieces("captured-by-black", capturedByBlack);
+}
+
+function updateCapturedDisplays(data) {
+  setCapturedState(data.captured_by_white || [], data.captured_by_black || []);
+}
+
+function applyOptimisticCapture(move) {
+  if (!move || !move.captured) return;
+
+  var capturedSymbol = move.color === "w"
+    ? move.captured.toLowerCase()
+    : move.captured.toUpperCase();
+
+  if (move.color === "w") {
+    capturedByWhite.push(capturedSymbol);
+  } else {
+    capturedByBlack.push(capturedSymbol);
+  }
+
+  renderCapturedPieces("captured-by-white", capturedByWhite);
+  renderCapturedPieces("captured-by-black", capturedByBlack);
+}
+
+function resetPipelinePanel() {
+  document.getElementById("pieces-polled").textContent = "-";
+  document.getElementById("pieces-volunteered").textContent = "-";
+  document.getElementById("chosen-reason-text").textContent = "Waiting for AI move...";
+  document.getElementById("proposals-details").style.display = "none";
+}
+
 function submitMove(source, target) {
+  var prevCapturedByWhite = capturedByWhite.slice();
+  var prevCapturedByBlack = capturedByBlack.slice();
   var move = game.move({ from: source, to: target, promotion: "q" });
   if (move === null) {
     clearSelection();
     updateStatus();
     return;
   }
+
+  applyOptimisticCapture(move);
 
   // Show the user's move on the board immediately
   board.position(game.fen());
@@ -90,6 +163,7 @@ function submitMove(source, target) {
       clearSelection();
       game.load(data.fen);
       board.position(data.fen);
+      updateCapturedDisplays(data);
 
       if (data.ai_move) {
         document.getElementById("pieces-polled").textContent =
@@ -121,6 +195,8 @@ function submitMove(source, target) {
         } else {
           details.style.display = "none";
         }
+      } else {
+        resetPipelinePanel();
       }
 
       if (data.game_over) {
@@ -136,6 +212,7 @@ function submitMove(source, target) {
     error: function (xhr) {
       thinking = false;
       clearSelection();
+      setCapturedState(prevCapturedByWhite, prevCapturedByBlack);
       var errMsg = "Error";
       try { errMsg = JSON.parse(xhr.responseText).error; } catch (e) {}
       alert("Move failed: " + errMsg);
@@ -204,17 +281,29 @@ $(window).on("resize", function () {
 });
 
 document.getElementById("newGameBtn").addEventListener("click", function () {
-  $.post("/api/new", function () {
+  $.post("/api/new", function (data) {
     game.reset();
     board.position("start");
     thinking = false;
     clearSelection();
-    document.getElementById("pieces-polled").textContent = "-";
-    document.getElementById("pieces-volunteered").textContent = "-";
-    document.getElementById("chosen-reason-text").textContent = "Waiting for AI move...";
-    document.getElementById("proposals-details").style.display = "none";
+    updateCapturedDisplays(data || {});
+    resetPipelinePanel();
     updateStatus();
   });
 });
 
-updateStatus();
+function loadInitialState() {
+  $.get("/api/state", function (data) {
+    if (data && data.fen) {
+      game.load(data.fen);
+      board.position(data.fen);
+    }
+    updateCapturedDisplays(data || {});
+    updateStatus();
+  }).fail(function () {
+    updateCapturedDisplays({});
+    updateStatus();
+  });
+}
+
+loadInitialState();

@@ -1,24 +1,20 @@
 # ♟️ LLM Chess — Every Piece Has a Voice
 
+![Cover](static/image.png)
+
 An interactive chess app where the AI (Black) is chosen by a multi-agent LLM pipeline:
 
 1. Each Black piece with legal moves is polled with **`gpt-5-mini`**.
 2. Proposed moves are heuristically scored in Python.
 3. An orchestrator model (**`gpt-5.2`**) picks the final move.
 
+Each `gpt-5-mini` piece gets all of its legal moves plus a simple 0 to 1 risk value that estimates how likely that move gets captured next turn.
+The `gpt-5.2` orchestrator gets the full proposal list with score weights, but it is free to choose any legal move (not forced to pick the top score).
+That score is generated from chess signals like material gain, checks/checkmate, pressure on opponent pieces, center control, and penalties for moving into danger, then normalized.
+
 You play as White in the browser.
 
-## Stack
-
-- Frontend: HTML/CSS/JS + `chess.js` + `chessboard.js`
-- Backend: Flask + Flask-CORS
-- Chess rules/board state: `python-chess`
-- LLM calls: OpenAI Python SDK
-
 ## Requirements
-
-- Python 3.10+ (recommended)
-- OpenAI API key
 
 Create a `.env` file in the project root:
 
@@ -35,14 +31,7 @@ python app.py
 
 Open: `http://localhost:5000`
 
-## API Endpoints
-
-- `POST /api/new`: reset game, returns current FEN
-- `POST /api/move`: submit White move (`from`, `to`, optional `promotion`)
-- `GET /api/state`: current board/game-over state
-
 ## Runtime Behavior Notes
 
 - Backend validates user moves and AI moves against legal chess moves.
 - If model output is invalid/unavailable, AI falls back to a legal move.
-- Game state is stored in-memory in a single global board (good for local demo, not multi-user production).
