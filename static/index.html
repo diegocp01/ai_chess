@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AI Chess</title>
+  <link rel="stylesheet"
+        href="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.css" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div id="container">
+    <h1>AI Chess</h1>
+    <p id="status">Your turn (White)</p>
+    <div id="game-area">
+      <div id="board-wrapper">
+        <div id="board" style="width: 480px;"></div>
+      </div>
+      <div id="ai-sidebar">
+        <h3>AI Pipeline</h3>
+        <div id="pipeline-stats">
+          <div class="stat-row">
+            <span class="stat-label">Pieces with moves</span>
+            <span class="stat-value" id="pieces-polled">-</span>
+          </div>
+          <div class="stat-row">
+            <span class="stat-label">Volunteered to move</span>
+            <span class="stat-value" id="pieces-volunteered">-</span>
+          </div>
+        </div>
+        <div id="chosen-reasoning">
+          <h4>Chosen Piece Reasoning</h4>
+          <p id="chosen-reason-text">Waiting for AI move...</p>
+        </div>
+        <details id="proposals-details" style="display:none;">
+          <summary>All Proposals</summary>
+          <ul id="proposals-list"></ul>
+        </details>
+      </div>
+    </div>
+    <div id="controls">
+      <button id="newGameBtn">New Game</button>
+    </div>
+  </div>
+
+  <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+  <script src="https://unpkg.com/@chrisoakman/chessboardjs@1.0.0/dist/chessboard-1.0.0.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
